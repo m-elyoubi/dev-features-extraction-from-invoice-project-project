@@ -1,0 +1,8 @@
+PyPDF2
+fpdf
+pdf2image
+scikit-image
+opencv-python-headless
+PyMuPDF
+Pillow
+reportlab
