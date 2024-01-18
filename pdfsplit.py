@@ -458,7 +458,7 @@ def process_single_image(image_key, s3_bucket, conditions):
         text = "\n".join(result['Text'] for result in results['Blocks'] if result['BlockType'] == 'LINE')
 
         # Check if any condition is met and 'Dear' is not in the text
-        if any(condition in text for condition in conditions) and 'Dear' not in text:
+        if any(condition in text for condition in conditions) and ('Dear' or 'S M T W T F S') not in text:
             return image_key
 
     except Exception as e:
