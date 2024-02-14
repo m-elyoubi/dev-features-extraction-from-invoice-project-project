@@ -17,7 +17,7 @@ from io import BytesIO
 from PIL import Image
 import locale
 import pandas as pd
-
+from botocore.exceptions import NoCredentialsError
 # Initialize AWS clients
 s3 = boto3.client('s3')  # S3 client
 textract_client = boto3.client('textract')  # Textract client
@@ -208,11 +208,13 @@ def extract_totalpayment_duedate_companyname(s3_bucket, image_key,df):
     due_date_pattern = re.compile(r'(Cigna.|\n|Bill Date:\s*|TOTAL AMOUNT DUE|Payment Due Date|Due Date|Invoice Date|DUE DATE)\s+((\d{1,2}/\d{1,2}/\d{2,4})|(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s*\d{2,4})')
 
     # Search for the due date pattern in the extracted text
-    match = due_date_pattern.search(text)
-    due_date = next((x for x in match.groups() if x is not None), None) if match else None
-         
+    due_date_match = due_date_pattern.search(text)
+
+    # Extract the formatted date from the match or set to None if not found
+    formatted_date = due_date_match.group(2) if due_date_match else None
+
     # Parse the formatted date using the parse_date function
-    due_date = parse_date(due_date)
+    due_date = parse_date(formatted_date)
 
     # Extract the total payment amount using the total_Payment_Due function
     total_payment = total_Payment_Due(text)
@@ -235,7 +237,7 @@ def total_Payment_Due(text):
     - total_payment: The extracted total payment amount as a string or 'None' if not found.
     """
     # Define a regular expression pattern to identify total payment amounts
-    totalpayment_pattern = re.compile(r'Amount due on Bill 7015[\s\S]*?\$([\d,]+\.\d{2})|Total Deposits and Additions[\s\S]*?\$([\d,]+\.\d{2})|Total Balance Due[\s\S]*?\$([\d,]+\.\d{2})|TOTAL AMOUNT DUE\s+\d{2}/\d{2}/\d{4}\s+\$([\d.]+)|Total Payment Due\n?.*?\n?([\d,]+\.\d+)|TOTAL DUE\s*\$([\d.]+)|AMOUNT DUE\s*([\d,.]+)|Total Due\s*\$([\d,.]+)|auto pay:?\s*\$([\d,.]+)|TOTAL AMOUNT DUE\s*.*?\n.*?\n\s*\$([\d.]+)')
+    totalpayment_pattern = re.compile(r'TOTAL AMOUNT DUE\s+\d{2}/\d{2}/\d{4}\s+\$([\d.]+)|Total Payment Due\n?.*?\n?([\d,]+\.\d+)|TOTAL DUE\s*\$([\d.]+)|AMOUNT DUE\s*([\d,.]+)|Total Due\s*\$([\d,.]+)|auto pay:?\s*\$([\d,.]+)|TOTAL AMOUNT DUE\s*.*?\n.*?\n\s*\$([\d.]+)')
 
     # Search for the total payment pattern in the given text
     totalpayment_match = totalpayment_pattern.search(text)
@@ -303,7 +305,7 @@ def process_pages(s3_bucket, file_content_array, images_keys_np, split_prefix,df
                 similarity_threshold = 0.90
 
                 # Check if the page is similar to the previous one based on SSIM or extracted information
-                if similarity_index >= similarity_threshold and  (current_company_name==reference_companyname) :  # or (current_account_number == reference_account_number and current_totalpayment == reference_totalpayment)
+                if similarity_index >= similarity_threshold or (current_company_name==reference_companyname) :  # or (current_account_number == reference_account_number and current_totalpayment == reference_totalpayment)
                     print(f"Page {i} is similar to the previous page. Adding to the current sequence.")
                     print(f"{current_company_name},previous cp :{reference_companyname} for Page {i} and previous {i-1}")
                     similar_pages.append(img_np)
@@ -536,16 +538,14 @@ def extract_due_date(text):
     str: The extracted due date in the format "%y%m%d" or None if not found.
     """
     # Define a regular expression pattern to find due dates in the text
-    due_date_pattern = re.compile(r'DATE:\s*([\d/]+)|Billing Date: (\w{3} \d{1,2}, \d{4})|Billing Date\s*([\d/]+)|(Cigna.|\n|Bill Date:\s*|TOTAL AMOUNT DUE|Payment Due Date|Due Date|DUE DATE|Invoice Date:?|)\s+((\d{1,2}/\d{1,2}/\d{2,4})|(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s*\d{2,4})|Statement Date:?\s*(\w+ \d+, \d{4})|\b(\d{1,2}/\d{1,2}/\d{4})\b')
+    due_date_pattern = re.compile(r'(Cigna.|\n|Bill Date:\s*|TOTAL AMOUNT DUE|Payment Due Date|Due Date|DUE DATE)\s+((\d{1,2}/\d{1,2}/\d{2,4})|(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s*\d{2,4})')
     
     # Search for due dates using the defined pattern
     due_date_match = due_date_pattern.search(text)
-
-    due_date_match
     
-    # # Extract the second group from the match as the formatted date
-    # formatted_date = due_date_match.group(2) if due_date_match else None
-    # # print(f"formatted_date before:{formatted_date}")
+    # Extract the second group from the match as the formatted date
+    formatted_date = due_date_match.group(2) if due_date_match else None
+    # print(f"formatted_date before:{formatted_date}")
     
     # If a formatted date is found, convert it to the standardized output format
     date = convert_date(formatted_date) if formatted_date else None
@@ -639,12 +639,15 @@ def correct_customer_name(sentence):
 
 def extract_customer_name(text):
 
-    customer_name_match1 = re.search(r'Site Name:?\n?(.*)|(.*)\nPO BOX 853||(.+?)\n(.+?)\n(.+?)P\.O\. Box 853|((?:.*\n){3})(PO|P.O|P.O.)\s*(BOX|Box) 853|Client Name:?\s*(.*)',text)
+
+    
+
+    customer_name_match1 = re.search(r'(.+?)\n(.+?)\n(.+?)P\.O\. Box 853|((?:.*\n){3})(PO|P.O|P.O.)\s*(BOX|Box) 853',text)
 
     if customer_name_match1 is not None :
         x=next((x for x in customer_name_match1.groups() if x is not None), "default") 
         # if customer_name_match1 and customer_name_match1.group(1).strip()!= "":
-        # print(f'customer_name before:{x}')
+        print(f'customer_name before:{x}')
         customer_name = ' '.join(re.findall(r'\b[A-Z][A-Z\s]+\b', x))
 
         if len(customer_name)>3:
@@ -662,6 +665,9 @@ def extract_customer_name(text):
 def check_company_name(company, text_to_search):
     if ' '+company.lower()+' ' in text_to_search.lower():
             return company
+    elif ''+company.lower()+' ' in text_to_search.lower():
+   
+        return company
     else:
         return None
 
@@ -901,10 +907,29 @@ def pdf_to_images(pdf_path, predix, s3_bucket):
             image_key = f'{predix}/page_{i}.jpg'
             upload_to_s3(s3_bucket, image_key, image_buffer.getvalue(), 'image/jpeg')
             images.append(image_key)
+            # # Extract text content from the image using Textract
+            # text = image_to_text(s3_bucket, image_key)   
+            # file_path=f"/tmp/page_{i}.txt"
+            # write_to_file(text, file_path)
+           
+            # s3_key = f"text/page_{i}.txt"
+            
+            # upload_txtfile_to_s3(file_path, s3_bucket, s3_key)
+            
         return images
 
     except Exception as e:
         print(f"Error converting PDF to images: {str(e)}")
+
+import os
+
+def write_to_file(text, file_path):
+    with open(file_path, 'w') as file:
+        file.write(text)
+
+def upload_txtfile_to_s3(file_path, bucket_name, s3_key):
+    s3.upload_file(file_path, bucket_name, s3_key)
+
 
 def process_single_pdf(s3_bucket, pdf_file, output_bucket, all_csv_data, header_written,outputcsvname,df):
     """
@@ -981,10 +1006,10 @@ def ConvertPDFpages_to_images_and_sort(invoices_s3_bucket,images_folder,pdf_file
     # print(f'Processing PDF: {local_pdf_path}')
     # Convert PDF pages to images and extract relevant information
     sorted_images = sorted(pdf_to_images(local_pdf_path, images_folder, invoices_s3_bucket), key=lambda x: int(x.split('_')[-1].split('.')[0]))
-    extracted_images = sorted(process_images_basedoncondition(sorted_images, invoices_s3_bucket), key=lambda x: int(x.split('_')[-1].split('.')[0]))
-    print(f'extracted_images:{extracted_images}')
-
-    return extracted_images
+    # extracted_images = sorted(process_images_basedoncondition(sorted_images, invoices_s3_bucket), key=lambda x: int(x.split('_')[-1].split('.')[0]))
+    # print(f'extracted_images:{extracted_images}')
+    
+    return sorted_images
 
 def Process_extracted_images_createsplitPDFs(invoices_s3_bucket,extracted_images,SaveInvoices_prefix,split_prefix,outputcsvname,df):
 
@@ -1001,8 +1026,8 @@ def Process_extracted_images_createsplitPDFs(invoices_s3_bucket,extracted_images
         if image_contents:
             process_pages(invoices_s3_bucket, image_contents, images_keys_np, split_prefix,df)
         
-        fromsplitPDF_extract_information(invoices_s3_bucket,SaveInvoices_prefix,split_prefix,df)
-        process_invoicepdfs_to_csv(invoices_s3_bucket,SaveInvoices_prefix,output_bucket,outputcsvname,df)
+        # fromsplitPDF_extract_information(invoices_s3_bucket,SaveInvoices_prefix,split_prefix,df)
+        # process_invoicepdfs_to_csv(invoices_s3_bucket,SaveInvoices_prefix,output_bucket,outputcsvname,df)
 
 
 def handler(event, context):
@@ -1020,7 +1045,7 @@ def handler(event, context):
             # Process the extracted images and create split PDFs and process invoice pdfs to create csv file from invoice pdfs
             Process_extracted_images_createsplitPDFs(invoices_s3_bucket,extracted_images,"{}/{}".format(SaveInvoices_prefix, pdf_file.replace(".pdf", "")),"{}/{}".format(split_prefix, pdf_file.replace(".pdf", "")),pdf_file.replace("pdf", "csv"),df)
             
-                
+             
 
     return {
         'statusCode': 200,
