@@ -7,7 +7,6 @@ from skimage.metrics import structural_similarity as ssim
 import numpy as np
 from fpdf import FPDF
 import time
-from datetime import datetime
 import re
 import os
 import csv
@@ -15,7 +14,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import fitz
 from io import BytesIO
 from PIL import Image
+from datetime import datetime
 import locale
+from dateutil import parser
 import pandas as pd
 
 # Initialize AWS clients
@@ -217,28 +218,6 @@ def extract_totalpayment_duedate_companyname(s3_bucket, image_key,df):
     # Return a tuple containing the due date and total payment
     return pdf_name, due_date, total_payment, companyname
 
-def total_Payment_Due(text):
-    """
-    Extracts the total payment amount from a given text.
-
-    Parameters:
-    - text: The text containing information about the total payment.
-
-    Returns:
-    - total_payment: The extracted total payment amount as a string or 'None' if not found.
-    """
-    # Define a regular expression pattern to identify total payment amounts
-    totalpayment_pattern = re.compile(r'Amount due on Bill 7015[\s\S]*?\$([\d,]+\.\d{2})|Total Deposits and Additions[\s\S]*?\$([\d,]+\.\d{2})|Total Balance Due[\s\S]*?\$([\d,]+\.\d{2})|TOTAL AMOUNT DUE\s+\d{2}/\d{2}/\d{4}\s+\$([\d.]+)|Total Payment Due\n?.*?\n?([\d,]+\.\d+)|TOTAL DUE\s*\$([\d.]+)|AMOUNT DUE\s*([\d,.]+)|Total Due\s*\$([\d,.]+)|auto pay:?\s*\$([\d,.]+)|TOTAL AMOUNT DUE\s*.*?\n.*?\n\s*\$([\d.]+)')
-
-    # Search for the total payment pattern in the given text
-    totalpayment_match = totalpayment_pattern.search(text)
-
-    # If a match is found, extract the first non-empty group, otherwise set to 'None'
-    total_payment = next((x for x in totalpayment_match.groups() if x is not None), None) if totalpayment_match else None
-
-    # Return the extracted total payment amount
-    return total_payment
-
 def name_invoice(text,df):
     """
     Extracts information from the text, including customer name, due date, and total amount.
@@ -250,32 +229,58 @@ def name_invoice(text,df):
     Returns:
     dict: A dictionary containing extracted information and the renamed PDF file name.
     """
-    
+
     # Extract customer name, due date, and total amount from the text
     customer_name = extract_customer_name(text)
-    _,date = extract_due_date(text)
-    total_amount = extract_total_amount(text)
+    _,date = extract_date(text)
+    total_amount = extract_amount(text)
     company_name=extract_company_name(df, text)
 
-    print(f'---check:{customer_name},{date},{total_amount},{company_name}')
-    # Check if all required information is present
-    if date and customer_name  and total_amount and company_name:
+    invoice_name = None  
+
+    #------------------------------------------
+    # Check all possible cases
+    if date is not None and customer_name is not None and total_amount is not None and company_name is not None:
         # Sanitize customer name by replacing special characters with underscores
         sanitized_customer_name = re.sub(r'[\\/:"*?<>|]', '', customer_name)
         # Create a destination name with date, formatted total amount, and sanitized customer name
         invoice_name = f"{date} {format_currency(total_amount)} {company_name} {sanitized_customer_name}.pdf"
     
-    elif date and customer_name  and company_name:
+    elif date is None and customer_name is not None and total_amount is not None and company_name is not None:
+        sanitized_customer_name = re.sub(r'[\\/:"*?<>|]', '', customer_name)
+        invoice_name = f"{format_currency(total_amount)} {company_name} {sanitized_customer_name}.pdf"
+   
+    elif date is not None and customer_name is None and total_amount is not None and company_name is not None:
+        
+        invoice_name = f"{date} {format_currency(total_amount)} {company_name}.pdf"
+   
+    elif date is not None and customer_name is not None and total_amount is None and company_name is not None:
         sanitized_customer_name = re.sub(r'[\\/:"*?<>|]', '', customer_name)
         invoice_name = f"{date} {company_name} {sanitized_customer_name}.pdf"
-    elif date and company_name:
-        sanitized_customer_name = re.sub(r'[\\/:"*?<>|]', '', customer_name)
-        invoice_name = f"{date}{company_name}.pdf"
-    elif total_amount and company_name:
-        sanitized_customer_name = re.sub(r'[\\/:"*?<>|]', '', customer_name)
+   
+    elif date is not None and customer_name is not None and total_amount is not None and company_name is None:
+        sanitized_customer_name=re.sub(r'[\\/:"*?<>|]', '', customer_name)
+        invoice_name = f"{date} {format_currency(total_amount)} {sanitized_customer_name}.pdf"
+   
+    elif date is None and customer_name is None and total_amount is not None and company_name is not None:
+        
         invoice_name = f"{format_currency(total_amount)} {company_name}.pdf"
-    else:
-        invoice_name=f"{company_name}.pdf"
+   
+    elif date is None and customer_name is not None and total_amount is None and company_name is not None:
+        sanitized_customer_name=re.sub(r'[\\/:"*?<>|]', '', customer_name)
+        invoice_name = f"{company_name} {sanitized_customer_name}.pdf"
+
+    elif date is not None and customer_name is  None and total_amount is not None and company_name is  None:
+        invoice_name = f"{date} {format_currency(total_amount)}.pdf"
+    
+    elif total_amount is not None and company_name is  None and date is  None and customer_name is  None:
+        
+        invoice_name = f"{format_currency(total_amount)}.pdf"
+
+    elif total_amount is not None and company_name is  None and date is  None and customer_name is  None:
+        
+        invoice_name = f"{total_amount}.pdf"
+
 
 
     # Return a dictionary containing extracted information and the renamed PDF file name
@@ -330,8 +335,6 @@ def splitpdf_into_invoices(s3_bucket, file_content_array, images_keys_np, split_
             img = cv.fastNlMeansDenoisingColored(roi, None, 10, 10, 7, 21)
             roi_gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
 
-            # # Generate PDF names and paths
-            # pdf_name = f"pdf_{pdf_index}.pdf"
             temp_pdf_name = f"/tmp/pdf_{pdf_index}.pdf"
             
             current_pdf_name,current_due_date, current_totalpayment,current_company_name = extract_totalpayment_duedate_companyname(s3_bucket, images_keys_np[i-1],df)
@@ -348,6 +351,11 @@ def splitpdf_into_invoices(s3_bucket, file_content_array, images_keys_np, split_
 
                 # Check if the page is similar to the previous one based on SSIM or extracted information
                 if similarity_index >= similarity_threshold and  (current_company_name==reference_companyname) :  # or (current_account_number == reference_account_number and current_totalpayment == reference_totalpayment)
+                    print(f"Page {i} is similar to the previous page. Adding to the current sequence.")
+                    print(f"{current_company_name},previous  :{reference_companyname} for Page {i} and previous {i-1}")
+                    similar_pages.append(img_np)
+                # Check if the page is similar to the previous one based on SSIM or extracted information
+                elif current_company_name==reference_companyname :  # or (current_account_number == reference_account_number and current_totalpayment == reference_totalpayment)
                     print(f"Page {i} is similar to the previous page. Adding to the current sequence.")
                     print(f"{current_company_name},previous  :{reference_companyname} for Page {i} and previous {i-1}")
                     similar_pages.append(img_np)
@@ -512,90 +520,52 @@ def process_single_image(image_key, s3_bucket, conditions):
 
     return None
 
-def process_images_basedoncondition(images, s3_bucket):
-    """
-    Processes a list of images stored in an S3 bucket using Amazon Textract.
 
-    Parameters:
-    - images: A list of image keys in the S3 bucket.
-    - s3_bucket: The S3 bucket containing the images.
-
-    Returns:
-    list: A list of image keys that meet specified conditions after processing with Textract.
-    """
-    try:
-        # List of conditions to check in the extracted text
-        conditions = ['Account Number', 'Customer Number', 'Loan Number', 'Customer ID', 'LOAN #']
-
-        # List to store extracted images that meet the conditions
-        extracted_images = []
-
-        # Use ThreadPoolExecutor for concurrent processing of images
-        with ThreadPoolExecutor() as executor:
-            # Submit Textract processing tasks for each image in the list
-            futures = [executor.submit(process_single_image, image_key, s3_bucket, conditions) for image_key in images]
-
-            # Iterate over completed futures and collect results
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    extracted_images.append(result)
-
-        return extracted_images
-
-    except Exception as e:
-        print(f"Error processing images: {str(e)}")
-
-from datetime import datetime
 
 def convert_date(input_date):
+    
     """
     Converts the input date string into a standardized output date format.
 
     Parameters:
     - input_date (str): The input date string to be converted.
-
-    Returns:
-    str: The converted date string in the format "%y%m%d" or a default value if not supported.
     """
-    supported_formats = ["%B %d, %Y", "%B %d,%Y", "%m/%d/%Y", "%m/%d/%y", "%b %d, %Y"]
+    # Convert string to datetime object
+    date_object = datetime.strptime(input_date, "%Y-%m-%d")
 
-    if input_date == 'Invoice Date:':
-        return 'default_value'  # You can modify this line to return a default value or handle it accordingly
+    # Format the datetime object as ymd (year-month-day without separators)
+    output_format = date_object.strftime("%y%m%d")
+    return output_format
 
-    for format_str in supported_formats:
-        try:
-            parsed_date = datetime.strptime(input_date, format_str)
-            output_date = parsed_date.strftime("%y%m%d")
-            return output_date
-        except ValueError:
-            continue
-
-    # If all parsing attempts fail, raise an error or return a default value
-    return 'default_value'  # You can modify this line to return a default value or raise an error
-
-def extract_due_date(text):
+def extract_date(text):
     """
     Extracts the due date from the given text using a predefined pattern.
 
-    Parameters:
+    Parameters:d
     - text (str): The text from which the due date needs to be extracted.
 
     Returns:
     str: The extracted due date in the format "%y%m%d" or None if not found.
     """
-    # Define a regular expression pattern to find due dates in the text
-    due_date_pattern = re.compile(r'Due date:?\s*(\d{1,2}/\d{1,2}/\d{2,4})|DATE:\s*([\d/]+)|Billing Date: (\w{3} \d{1,2}, \d{4})|Billing Date\s*([\d/]+)|(Cigna.|\n|Bill Date:\s*|TOTAL AMOUNT DUE|Payment Due Date|Due Date|DUE DATE|Invoice Date:?|)\s+((\d{1,2}/\d{1,2}/\d{2,4})|(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s*\d{2,4})|Statement Date:?\s*(\w+ \d+, \d{4})|\b(\d{1,2}/\d{1,2}/\d{4})\b')
-    
-    # Search for due dates using the defined pattern
-    due_date_match = due_date_pattern.search(text)
+    formatted_date=None
 
-    formatted_date=next((x for x in due_date_match.groups() if x is not None), None) if due_date_match else None
-    formatted_date_convert=formatted_date
-    if formatted_date:
-        formatted_date_convert = convert_date(formatted_date) if formatted_date else None
-    print(f"formatted_date:{formatted_date}")
+    date_pattern = re.compile(r'\b(?:\d{1,2}[/]\d{1,2}[/]\d{2,4}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|may|june|july|august|september|october|november|december)\s\d{1,2},?\s?\d{2,4})\b')
+    # Find all matches in the text
+    date_match = date_pattern.findall(text.lower())
+
+    # # Parse the found dates using dateutil.parser
+    parsed_dates = [parser.parse(match) for match in date_match]
+
+    # formatted_date_convert=formatted_date
+    # If a date is found, print it
+    if parsed_dates:
+        date=parsed_dates[0].strftime("%Y-%m-%d")
+        formatted_date=date
+        formatted_date_convert = convert_date(date) if date else None
+        
+    
     return formatted_date,formatted_date_convert
+
 
 def findelement(customer_name_match):
     """
@@ -646,7 +616,8 @@ def convert_to_float(amount_str):
         amount_str = amount_str[1:]  # Remove the dollar sign
     amount_str = amount_str.replace(',', '')  # Remove commas
     return float(amount_str)
-def extract_total_amount(text):
+
+def extract_amount(text):
     """
     Extracts the total amount due from the given text using a predefined pattern.
 
@@ -656,15 +627,16 @@ def extract_total_amount(text):
     Returns:
     float: The extracted total amount as a float.
     """
-    # Define a regular expression pattern to find total amounts in the text
-    match = re.search(r'Amount due\n?.*\n?(\$\d{1,3}(?:,\d{3})*(?:\.\d{2})?)|TOTAL DUE\n?(\$\d{1,3}(?:,\d{3})*(?:\.\d{2})?)|Total Due:?\n?\s*(\$\d{1,3}(?:,\d{3})*(?:\.\d{2})?)|Balance Due\n?(\$\d{1,3}(?:,\d{3})*(?:\.\d{2})?)|Total amount paid to date:\n?(\$\d{1,3}(?:,\d{3})*(?:\.\d{2})?)|Amount due\n?[\s\S]*?(\$\d{1,3}(?:,\d{3})*(?:\.\d{2})?)|TOTAL AMOUNT DUE\s+\d{2}/\d{2}/\d{4}\s+\$([\d.]+)|Total Payment Due\n?.*?\n?([\d,]+\.\d+)|TOTAL DUE\s*\$([\d.]+)|AMOUNT DUE\s*([\d,.]+)|Total Due\s*\$([\d,.]+)', text)
-    
-    # If a match is found, extract the first non-empty group from the match
-    if match:
-        x = next((x for x in match.groups() if x is not None), "default")
+    currency_pattern = re.compile(r'\$(\s*[0-9,]+(?:\.[0-9]{2})?)')
 
-       
-        return  convert_to_float(x)
+    # Search for the total amount in the text
+    amount_match = currency_pattern.search(text)
+
+     # If an amount is found, print it
+    if amount_match:
+        extracted_amount = amount_match.group(1)
+        # print(f"Total amount:", extracted_amount)
+        return  convert_to_float(extracted_amount)
 
     # Return None if no match is found
     return None
@@ -685,7 +657,7 @@ def correct_customer_name(sentence):
 
 def extract_customer_name(text):
 
-    customer_name_match1 = re.search(r'Bill To:?\n?(.*)|BILL TO\n?(.*)|Site Name:?\n?(.*)|(.*)\nPO BOX 853||(.+?)\n(.+?)\n(.+?)P\.O\. Box 853|((?:.*\n){3})(PO|P.O|P.O.)\s*(BOX|Box) 853|Client Name:?\s*(.*)',text)
+    customer_name_match1 = re.search(r'(?<=is billing\s)(.*?)(?=\sfor the month)|billed to:?\n?(.*)|from:\n?(.*)|bill To:?\n?(.*)|bill to\n?(.*)|site Name:?\n?(.*)|(.*)\npo box 853|(.+?)\n(.+?)\n(.+?)p\.o\. box 853|((?:.*\n){3})(po|p.o|p.o.)\s*(box|box) 853|client name:?\s*(.*)',text.lower())
 
     if customer_name_match1 is not None :
         x=next((x for x in customer_name_match1.groups() if x is not None), "default") 
@@ -697,8 +669,6 @@ def extract_customer_name(text):
             c=  customer_name
         else:
             c=  x
-    
-        print(f'customer_name:{c}')
         return  correct_customer_name(c)
             # return findelement(potential_names)
                     
@@ -709,6 +679,9 @@ def check_company_name(company, text_to_search):
     if ' '+company.lower()+' ' in text_to_search.lower():
             return company
     elif ''+company.lower()+' ' in text_to_search.lower():
+   
+        return company
+    elif ''+company.lower()+'/' in text_to_search.lower():
    
         return company
     else:
@@ -729,58 +702,6 @@ def extract_company_name(df, text):
                 matching_company=company_result
     return matching_company
 
-def extract_information(s3_bucket, file_obj, SaveInvoicesprefix, text,df):
-    """
-    Extracts information from the text, including customer name, due date, and total amount.
-    Renames the S3 file based on the extracted information.
-
-    Parameters:
-    - s3_bucket (str): The S3 bucket where the file is stored.
-    - file_obj (str): The key or name of the file in the S3 bucket.
-    - SaveInvoicesprefix (str): The prefix used for saving invoices.
-    - text (str): The text from which information needs to be extracted.
-
-    Returns:
-    dict: A dictionary containing extracted information and the renamed PDF file name.
-    """
-    
-    # Extract customer name, due date, and total amount from the text
-    customer_name = extract_customer_name(text)
-    _,date = extract_due_date(text)
-    total_amount = extract_total_amount(text)
-    company_name=extract_company_name(df, text)
-
-    dest = None
-    
-    # Check if all required information is present
-    if date and customer_name  and total_amount and company_name:
-        # Sanitize customer name by replacing special characters with underscores
-        sanitized_customer_name = re.sub(r'[\\/:"*?<>|]', '', customer_name)
-        # Create a destination name with date, formatted total amount, and sanitized customer name
-        dest = f"{SaveInvoicesprefix}/{date} {format_currency(total_amount)} {company_name} {sanitized_customer_name}.pdf"
-    
-    elif date and customer_name  and company_name:
-        sanitized_customer_name = re.sub(r'[\\/:"*?<>|]', '', customer_name)
-        dest = f"{SaveInvoicesprefix}/{date} {company_name} {sanitized_customer_name}.pdf"
-    elif date and company_name:
-        sanitized_customer_name = re.sub(r'[\\/:"*?<>|]', '', customer_name)
-        dest = f"{SaveInvoicesprefix}/{date}{company_name}.pdf"
-    elif date and customer_name:
-        dest = f"{SaveInvoicesprefix}/{date}.pdf"
-    else:
-        dest=f"{file_obj}"
-
-
-    # Rename the S3 file based on the extracted information
-    rename_s3_file(s3_bucket, file_obj, dest)
-
-    # Return a dictionary containing extracted information and the renamed PDF file name
-    return {
-        'renamepdf': dest,
-        'Due Date': date,
-        'Customer Name': customer_name,
-        'company_name': company_name
-    }
 
 def check_s3_object_exists(bucket_name, object_key):
     """
@@ -846,10 +767,10 @@ def extract_invoice_info( pdf_file, text,df):
     """
     # Define patterns for extracting specific fields from the text
     patterns = {
-        "Customer/client": r'((?:.*\n){2})(PO|P.O|P.O.)\s*(BOX|Box) 853|(.*)(PO|P.O|P.O.)\s*(BOX|Box) 853',
-        "Due Date": r'DUE DATE\n(\w{3} \d{1,2}, \d{4})|Payment Due Date\n(\d{2}/\d{2}/\d{4})|DUE DATE(\d{2}/\d{1,2}/\d{4})|Invoice Date\n(\d{2}/\d{1,2}/\d{4})|Bill Date: (\w+ \d{1,2},\s*\d{4})|Cigna.\n(\w+ \d{1,2},\s*\d{4})|DUE DATE\n(\d{2}/\d{1,2}/\d{2,4})',
-        "Total amount": r'TOTAL AMOUNT DUE\s+\d{2}/\d{2}/\d{4}\s+\$([\d.]+)|Total Payment Due\n?.*?\n?([\d,]+\.\d+)|TOTAL DUE\s*\$([\d.]+)|AMOUNT DUE\s*([\d,.]+)|Total Due\s*\$([\d,.]+)',
-        "company name": r'PAYABLE TO:\s+00110?\s*(\w+\s?\w+)'
+        "Customer/client": None,
+        "Due Date": None,
+        "Total amount": None,
+        "company name":None
     }
     
     # Initialize a dictionary to store extracted information
@@ -863,9 +784,9 @@ def extract_invoice_info( pdf_file, text,df):
         
         customer_name = extract_customer_name(text)
         # date = extract_due_date(text)
-        total_amount = extract_total_amount(text)
+        total_amount = extract_amount(text)
         company_name=extract_company_name(df, text)
-        duedate,_=extract_due_date(text)
+        duedate,_=extract_date(text)
 
         if field=='Customer/client':
             extracted_info[field] = customer_name
@@ -937,18 +858,20 @@ def pdf_to_images(pdf_path, predix, s3_bucket):
     """
     try:
         images = []
-
+        # loop on all pages of the pdf and  convert them into images
         for i in range(1, len(fitz.open(pdf_path)) + 1):
             image_buffer = convert_page_to_image(pdf_path, i)
             image_key = f'{predix}/page_{i}.jpg'
             upload_to_s3(s3_bucket, image_key, image_buffer.getvalue(), 'image/jpeg')
+            # add image key in the list
             images.append(image_key)
         return images
 
     except Exception as e:
         print(f"Error converting PDF to images: {str(e)}")
 
-def process_single_pdf(s3_bucket, pdf_file, output_bucket, all_csv_data, header_written,outputcsvname,df):
+#  Extract Features and save them into csv file then ulpoad it in s3
+def saveextractFeatures_savethem_into_csv(s3_bucket, pdf_file, output_bucket, all_csv_data, header_written,outputcsvname,df):
     """
     Processes a single PDF file, extracts information, and saves data to a CSV file.
 
@@ -985,12 +908,15 @@ def process_single_pdf(s3_bucket, pdf_file, output_bucket, all_csv_data, header_
         Body=csv_buffer.getvalue()
     )
 
+# read company names from csv files
 def readcompnaynamefile(invoices_s3_bucket,file_key):
     # Download CSV file to /tmp/
     s3.download_file(invoices_s3_bucket, file_key, f'/tmp/{file_key}')
     companiesdf = pd.read_csv(f'/tmp/{file_key}')
     return companiesdf
 
+
+# this function will call the saveextractFeatures_savethem_into_csv function for iterate through each invoice PDF in the SaveInvoices folder
 def process_invoicepdfs_to_csv(invoices_s3_bucket,SaveInvoices_prefix,output_bucket,outputcsvname,df):
     # List split PDFs in the SaveInvoices folder
     response = s3.list_objects_v2(Bucket=invoices_s3_bucket, Prefix=SaveInvoices_prefix)
@@ -1003,21 +929,20 @@ def process_invoicepdfs_to_csv(invoices_s3_bucket,SaveInvoices_prefix,output_buc
         pdf_file = obj['Key']
         if pdf_file.lower().endswith('.pdf'):
             # print(f'Link to PDF: {pdf_file}')
-            process_single_pdf(invoices_s3_bucket, pdf_file, output_bucket, all_csv_data, header_written,outputcsvname,df)
+            saveextractFeatures_savethem_into_csv(invoices_s3_bucket, pdf_file, output_bucket, all_csv_data, header_written,outputcsvname,df)
             header_written = True 
 
-
+# this function will convert pdf file into images
 def ConvertPDFpages_to_images_and_sort(invoices_s3_bucket,images_folder,pdf_file):
     local_pdf_path = f'/tmp/{pdf_file}'
     download_file(input_s3_bucket, pdf_file, local_pdf_path)
-    # print(f'Processing PDF: {local_pdf_path}')
     # Convert PDF pages to images and extract relevant information
     sorted_images = sorted(pdf_to_images(local_pdf_path, images_folder, invoices_s3_bucket), key=lambda x: int(x.split('_')[-1].split('.')[0]))
-    # extracted_images = sorted(process_images_basedoncondition(sorted_images, invoices_s3_bucket), key=lambda x: int(x.split('_')[-1].split('.')[0]))
-
     return sorted_images
 
-def Process_extracted_images_createsplitPDFs(invoices_s3_bucket,extracted_images,SaveInvoices_prefix,outputcsvname,df):
+
+
+def splitInvoiceToInvoicespdf_savefeaturesextractintocsv(invoices_s3_bucket,extracted_images,SaveInvoices_prefix,outputcsvname,df):
 
     if extracted_images:
         image_contents = []
@@ -1030,8 +955,11 @@ def Process_extracted_images_createsplitPDFs(invoices_s3_bucket,extracted_images
             images_keys_np.append(image_key)
 
         if image_contents:
-            splitpdf_into_invoices(invoices_s3_bucket, image_contents, images_keys_np, SaveInvoices_prefix,df)
 
+            # split scanned pdf documents into invoices based on name the invoices and images' similarity
+            splitpdf_into_invoices(invoices_s3_bucket, image_contents, images_keys_np, SaveInvoices_prefix,df)
+        
+        #  
         process_invoicepdfs_to_csv(invoices_s3_bucket,SaveInvoices_prefix,output_bucket,outputcsvname,df)
 
 
@@ -1048,11 +976,11 @@ def handler(event, context):
         if pdf_file.lower().endswith('.pdf'):
             extracted_images=ConvertPDFpages_to_images_and_sort(invoices_s3_bucket,images_folder,pdf_file)
             # Process the extracted images and create split PDFs and process invoice pdfs to create csv file from invoice pdfs
-            Process_extracted_images_createsplitPDFs(invoices_s3_bucket,extracted_images,"{}/{}".format(SaveInvoices_prefix, pdf_file.replace(".pdf", "")),pdf_file.replace("pdf", "csv"),df)
+            splitInvoiceToInvoicespdf_savefeaturesextractintocsv(invoices_s3_bucket,extracted_images,"{}/{}".format(SaveInvoices_prefix, pdf_file.replace(".pdf", "")),pdf_file.replace("pdf", "csv"),df)
             
                 
-
     return {
         'statusCode': 200,
         'body': 'Textract jobs completed for all PDFs in the input bucket.'
     }
+    
